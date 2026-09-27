@@ -23,17 +23,19 @@ import semver from 'semver'
 // and forbids `sourceEventSeqs` on assistant replaces; both are pinned by the
 // typecheck against the 0.1.7-rc.1 devDeps.
 //
-// The explicit `>=0.1.5-alpha.1 <0.1.8-0` form spans EXACTLY the verified
-// 0.1.5 + 0.1.6 + 0.1.7 seam lines (every prerelease plus any final of each)
-// and nothing beyond: node-semver sorts `0.1.8-0` before any `0.1.8-x`
-// prerelease (numeric ids precede alphanumeric ones), so the next line's
-// alphas/rCs are rejected until someone verifies them deliberately. A caret
-// would silently admit unverified lines — never allowed here (house rule).
-//
-// The same-tuple prerelease rule still applies underneath: a candidate with a
-// prerelease tag only satisfies a range when some comparator shares its
-// [major, minor, patch] tuple — `0.1.5-alpha.1`/`rc.x` all share tuple 0.1.5,
-// which is why one clause covers the whole line.
+// The explicit THREE-clause form spans EXACTLY the verified 0.1.5 + 0.1.6 +
+// 0.1.7 seam lines (every prerelease plus any final of each) and nothing
+// beyond. Each line needs its OWN clause because of node-semver's same-tuple
+// prerelease rule: a candidate with a prerelease tag only satisfies a range
+// when some comparator shares its [major, minor, patch] tuple — so a single
+// `>=0.1.5-alpha.1 <0.1.8-0` interval would SILENTLY REJECT every 0.1.6 /
+// 0.1.7 prerelease (only their finals would install; found in #180 review by
+// pinning every published version below). The per-line anchors
+// (`0.1.6-alpha.1`, `0.1.7-alpha.1`) put a same-tuple comparator on each line;
+// node-semver sorts `0.1.8-0` before any `0.1.8-x` prerelease (numeric ids
+// precede alphanumeric ones), so the next line's alphas/rCs are rejected until
+// someone verifies them deliberately. A caret would silently admit unverified
+// lines — never allowed here (house rule).
 //
 // Versions below come from `npm view @deepseek-ai/dsh-session versions` — the
 // published line matches dsh-compaction / dsh-llm / dsh-tools exactly.
@@ -63,18 +65,25 @@ for (const peerName of seamPeers) {
 	assert.equal(typeof peerRange, 'string', `${peerName} must be declared as a peer (runtime VALUE-import)`)
 
 	test(`${peerName}: peer range accepts the verified 0.1.5–0.1.7 seam lines`, () => {
-		// Every published 0.1.5 version installs — including the live desktop
-		// build from issue #136 (0.1.5-alpha.2).
-		for (const v of ['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1']) {
+		// Every PUBLISHED version of the three verified lines installs — the
+		// list mirrors `npm view @deepseek-ai/dsh-session versions` at the time
+		// each line was admitted (0.1.5 floor: issue #136; 0.1.6 + 0.1.7: issue
+		// #174 seam verification, docs/dsh-porting-verification.md 2026-09-24).
+		for (const v of [
+			'0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2', '0.1.5-rc.3',
+			'0.1.6-alpha.1', '0.1.6-alpha.2',
+			'0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.2',
+		]) {
 			assert.equal(
 				semver.satisfies(v, peerRange),
 				true,
-				`${v} must satisfy ${peerRange} (same replace-op dialect as 0.1.5-alpha.1)`,
+				`${v} must satisfy ${peerRange} (verified seam line)`,
 			)
 		}
-		// Future same-tuple prereleases keep installing: publishing newer rCs on
-		// the 0.1.5 line never breaks installs.
-		for (const v of ['0.1.5-rc.9', '0.1.5-rc.99']) {
+		// Future same-tuple prereleases keep installing on EVERY line: publishing
+		// newer rCs on a verified line never breaks installs (this is precisely
+		// what the one-clause-per-line form guarantees).
+		for (const v of ['0.1.5-rc.9', '0.1.5-rc.99', '0.1.6-rc.1', '0.1.7-rc.9']) {
 			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (same-line rc)`)
 		}
 		// A final 0.1.5 (no prerelease) is a normal version and stays in range.

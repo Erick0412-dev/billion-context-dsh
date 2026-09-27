@@ -71,9 +71,12 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 > **DSH version compatibility.** The package declares all five runtime seam
 > packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools` /
 > `dsh-settings`) as peer
-> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.8-0` — the three
+> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0` — the three
 > verified lines `0.1.5` / `0.1.6` / `0.1.7` (every prerelease plus each line's
-> final release). From the `0.1.5` line
+> final release; written as one clause per line because node-semver only lets a
+> prerelease satisfy a range when some comparator shares its [major, minor,
+> patch] tuple — a single interval would silently reject every 0.1.6 / 0.1.7
+> prerelease). From the `0.1.5` line
 > on, the session's replace operation was renamed from `{ op, start, end }` to
 > `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
 > keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)

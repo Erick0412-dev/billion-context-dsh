@@ -423,7 +423,7 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
 
  **后续（§4.9）**：SettingsForms 迁移已由 issue #174 完成——五个接缝 × 三条线
  （0.1.5 / 0.1.6 / 0.1.7）逐一核验 npm 产物、双轨集成落地、peer 区间显式拓宽到
- `>=0.1.5-alpha.1 <0.1.8-0`。详见 §4.9；本节保留为 #173 当时的降级设计记录。
+ `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0`。详见 §4.9；本节保留为 #173 当时的降级设计记录。
 
  **测试**（tests/settings.test.ts）：`FormsLikeSettingsService` fixture 镜像 0.1.7 表面
  （有 configure/describe/update/replace/mutate、无 installSection）→ 构造不抛、
@@ -441,7 +441,7 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  dsh-settings 服务重构（§4.8 背景）与 deepseek 适配器协议切换（OpenAI chat-completions SSE →
  DeepSeek Messages 类型化 SSE，旧帧在 dsh-llm-deepseek/lib/index.js:1531 抛
  MALFORMED_RESPONSE；影响 e2e fake LLM，见 docs/e2e-harness-design.md 日志）。peer 区间显式
- 拓宽为 `>=0.1.5-alpha.1 <0.1.8-0`（永不 caret；`0.1.8-0` 排序在任何 0.1.8-x 预发布之前，
+ 拓宽为 `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0`（永不 caret；每线一个分量是 node-semver 同元组预发布规则的硬性要求——单一区间会悄悄拒绝 0.1.6 / 0.1.7 的全部预发布，#180 review 实测发现并修正；`0.1.8-0` 排序在任何 0.1.8-x 预发布之前，
  下一线在验证前保持拒绝），devDep 基线移到 `0.1.7-rc.1`（当前 43 个 dsh-* 包全部钉该线），
  `tests/peer-range.test.ts` 重钉三条线的 accept/reject 断言。
 
@@ -610,7 +610,7 @@ v2 状态：R1–R5 已由评审核验关闭，遗留两个实现期验证门（
 
 ## 修订记录
 
-- **v5（issue #174，SettingsForms 迁移）**：正式把 0.1.7 线纳入支持范围——双轨能力探测（≤0.1.6 走 `installSection`，≥0.1.7 走 `describe/update/replace`，区间外单条 warn 干净降级）；forms 分支按 profile entry id `compaction-acp` 寻址，六键经静态 Config schema 的 `.volatile()` 标注进入表单；热应用由每步 `resyncSettings()` 主动重读驱动（表单写入不发出事件）；0.1.7 下六键由组合行 + volatile 引用承载（`~/.dsh/settings.yaml` 消失，legacy import 只对 ui-developer-tools / ui-onboarding / shell 有映射，见 §4.9）。peer 区间 `>=0.1.5-alpha.1 <0.1.8-0`，devDep 基线 `0.1.7-rc.1`（43 个 dsh-* 包）。
+- **v5（issue #174，SettingsForms 迁移）**：正式把 0.1.7 线纳入支持范围——双轨能力探测（≤0.1.6 走 `installSection`，≥0.1.7 走 `describe/update/replace`，区间外单条 warn 干净降级）；forms 分支按 profile entry id `compaction-acp` 寻址，六键经静态 Config schema 的 `.volatile()` 标注进入表单；热应用由每步 `resyncSettings()` 主动重读驱动（表单写入不发出事件）；0.1.7 下六键由组合行 + volatile 引用承载（`~/.dsh/settings.yaml` 消失，legacy import 只对 ui-developer-tools / ui-onboarding / shell 有映射，见 §4.9）。peer 区间 `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0`，devDep 基线 `0.1.7-rc.1`（43 个 dsh-* 包）。
 - **v4（issue #173，能力探测）**：dsh-settings 0.1.7 全线移除 `installSection`
  （服务改名 `SettingsForms`），超区间安装时在启动期抛 TypeError 污染日志。
  注入回调加 `typeof` 能力探测：缺失时记一条 warn 并干净降级（不注册、不捕获句柄、
