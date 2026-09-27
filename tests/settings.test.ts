@@ -46,6 +46,16 @@ import { kernelConfigFor } from '../src/config.ts'
 import { acpCommand } from '../src/commands.ts'
 import type { ToolEnvironment } from '../src/tools.ts'
 import { DEFAULT_CONTEXT_WINDOW } from '../src/window.ts'
+import { buildTextSession } from './helpers.ts'
+
+function fakeAgent(session: Session): Agent {
+  return {
+    id: session.id,
+    session,
+    options: { provider: 'test-provider', model: 'test-model' },
+    ctx: new Context(),
+  } as unknown as Agent
+}
 
 /**
  * Stand-in for dsh-settings <= 0.1.6's SettingsProvider. The real class has no
@@ -635,7 +645,7 @@ test('M6: a settings service speaking NEITHER API degrades gracefully (issue #17
 
 test('M6: a composed preset seeds the base layer AND the live reads (issue #176)', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
   try {
     // Exactly the three preset-filled threshold keys — not the full resolved
@@ -652,13 +662,17 @@ test('M6: a composed preset seeds the base layer AND the live reads (issue #176)
     assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.7)
     assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.5)
     // A runtime override still wins over the composed preset...
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.55 } })
     await flushRounds()
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.55)
     // ...and the other two keys stay at their preset values.
     assert.equal(engine.env.nudgeMinContextLimitPct, 0.3)
     assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.7)
+  } finally {
+    await fiber.dispose()
+  }
+})
 // ── Issue #174: the 0.1.7 forms line (SettingsForms semantics) ───────────────
 
 test('M6: forms host — a SettingsForms write hot-applies through the volatile refs', async () => {
@@ -690,7 +704,7 @@ test('M6: forms host — a SettingsForms write hot-applies through the volatile 
 
 test('M6: /acp-prune config attributes a preset-filled key to `base`, reset returns to the preset (issue #176)', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
   try {
     const list = await runAcp(engine.env, 'config')
@@ -709,6 +723,10 @@ test('M6: /acp-prune config attributes a preset-filled key to `base`, reset retu
     assert.match(resetResult, /composition value 0\.5/)
     await flushRounds()
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.5)
+  } finally {
+    await fiber.dispose()
+  }
+})
 test('M6: forms host — /acp-prune config round-trips with revision tracking', async () => {
   const root = new Context()
   const maxRef = makeVolatileRef(0.7)
@@ -752,4 +770,55 @@ test('M6: forms host — a stale revision raises SettingsConflictError', async (
   )
   await service.update(ACP_SETTINGS_NAMESPACE, { autoNudge: true }, 1)
   assert.equal(service.describe()[0]?.revision, 2)
+})
+
+test('M6: forms host — a committed write hot-applies on the NEXT pre-step (the resyncSettings driver)', async () => {
+  const root = new Context()
+  const minRef = makeVolatileRef(0.3)
+  const maxRef = makeVolatileRef(0.7)
+  let service: FormsSettingsService | undefined
+  await root.plugin((ctx) => {
+    service = new FormsSettingsService(ctx, {
+      nudgeMinContextLimitPct: minRef.ref,
+      nudgeMaxContextLimitPct: maxRef.ref,
+      autoNudge: false,
+    })
+  })
+  const forms = service as FormsSettingsService
+  const logs: Message[] = []
+  const { fiber, engine } = await mountEngine(
+    root,
+    { nudgeMinContextLimitPct: minRef.ref, nudgeMaxContextLimitPct: maxRef.ref, autoNudge: false },
+    (ctx) => {
+      ctx.logger.exporter({ levels: { default: 3 }, export: (message) => logs.push(message) })
+    },
+  )
+  try {
+    // Commit an out-of-order pair through the forms seam: each value passes the
+    // schema (both inside [0,1]) but describeSettingsChange flags the ordering.
+    await forms.update(ACP_SETTINGS_NAMESPACE, { nudgeMinContextLimitPct: 0.9, nudgeMaxContextLimitPct: 0.4 })
+
+    // A forms write commits into the volatile refs and emits NO event this
+    // engine receives, so nothing re-reads it until a step runs: no change
+    // effect before the pre-step driver fires.
+    assert.deepEqual(logs.filter((m) => m.type === 'warn'), [], 'no change effect before a step runs')
+
+    // The pre-step driver diffs the live refs against the last synced snapshot
+    // and applies the effects — on the forms line this is the ONLY trigger.
+    // autoNudge is off so the step stays cheap and returns right after resync.
+    await root.waterfall(
+      'agent/pre-step' as never,
+      { agent: fakeAgent(buildTextSession(2)) } as never,
+      async () => ({ kind: 'enter', messages: [] }) as never,
+    )
+
+    const warns = logs.filter((m) => m.type === 'warn')
+    assert.equal(warns.length, 1, 'the order-anomaly warning fired exactly once, via the pre-step driver')
+    assert.match(String(warns[0]!.args[0]), /nudgeMinContextLimitPct \(0\.9\) >= nudgeMaxContextLimitPct \(0\.4\)/)
+    // The committed values are visible on the live surface for the rest of the session.
+    assert.equal(engine.env.nudgeMinContextLimitPct, 0.9)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.4)
+  } finally {
+    await fiber.dispose()
+  }
 })
