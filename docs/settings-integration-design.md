@@ -467,7 +467,20 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  的组合行 id，后续写入会以晦涩错误失败，不如提前点名）；describe() 抛错则有意吞掉（宿主缺陷，
  留到首次使用时大声暴露，不在启动期自修）。
 
- **热应用驱动**：表单写入在步骤之间提交进我们 fiber config 的 volatile 引用，且**不发出任何事件**
+  **非表单键的边界（手写组合行，#180 review 期间核实）**：forms 层拥有的恰好是那六个
+  `.volatile()` 标量键；`coreOverrides` / `preset` / `prompts` / `countTokens` 不是 volatile——
+  它们根本不在设置 schema 里（SETTINGS_KEYS，src/settings.ts:39），非严格校验只是让未声明行
+  在 fiber 启动期原样通过。对钉住的 dsh-settings 0.1.7-rc.1 产物逐行核验（lib/index.js
+  `write()`，最终表达式在 :534）：`update` / `replace` / `mutate` 都以
+  `mergeLayers(strip(raw, form), next)` 收尾——`strip` 只从当前 raw config 摘掉 volatile 拥有
+  的路径，`next` 只含 volatile 路径内容（`projectForm`，:141），而 `mergeLayers`（:281）的
+  `over` 层永不携带 undefined 条目（稀疏 patch 擦不掉下层键）。因此本引擎的三种写形
+  （`set` 单键 patch、单键 `reset` 逐字透传其余键 src/commands.ts:348、`reset all` →
+  `replace({})`）都保住手写行上的非表单键；`reset all` 只清该行上的 volatile 值。唯一破坏性
+  操作是手工删整行——`coreOverrides` 随之消失且无人回写；该行为在三条线上完全一致（表单从未
+  写过它），不是 #180 引入的回归。release note 对「已有手写组合行的用户」以此为准。
+
+  **热应用驱动**：表单写入在步骤之间提交进我们 fiber config 的 volatile 引用，且**不发出任何事件**
  ——引擎在每个 `agent/pre-step` 顶部调 `resyncSettings()`（src/index.ts:606，位于 autoNudge 闸门
  之前，保证刚提交的改动作用于本步而非下一步）主动重读。legacy/degrade 模式下这是廉价 no-op
  （重解同一组值，diff 为空）。
