@@ -33,6 +33,14 @@
  * messages carry `source: { kind: 'model', provider, model }` ON THE MESSAGE,
  * and tool results carry an `id` plus a `{ kind: 'tool', callId }` source.
  * Those are the shapes the real host writes; the builders below mirror them.
+ *
+ * Node floor: the released codec statically imports node:zlib's zstd API
+ * (`createZstdCompress` & co.), which exists only from Node 22.15 on — on an
+ * older Node the module fails at LINK time, which would take down this whole
+ * file, including the wrapper-shape test below that needs no persistence at
+ * all. So the codec is imported dynamically and its absence degrades to an
+ * explicit skip of the two round-trip tests; CI runs the suite on Node 22
+ * (ci.yml), where all three run.
  */
 
 import { test } from 'node:test'
@@ -41,7 +49,19 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+// Deliberately dynamic: a static import would fail at link time on Node < 22.15
+// (the codec's own static node:zlib zstd import) and kill every test in this
+// file, including the one below that never touches the persistence stack.
+let JsonlSessionPersistence: typeof import('@deepseek-ai/dsh-session-persistence-jsonl').default | undefined
+try {
+  JsonlSessionPersistence = (await import('@deepseek-ai/dsh-session-persistence-jsonl')).default
+} catch {
+  // Older Node without node:zlib zstd — round-trip tests skip with a reason.
+}
+const persistenceSkipReason =
+  JsonlSessionPersistence === undefined
+    ? 'released JSONL codec needs node:zlib zstd (Node >= 22.15); running on an older Node'
+    : false
 import { Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
@@ -158,9 +178,11 @@ function buildEngineLog(): Session {
  * rejects any row at append or read time.
  */
 async function persistAndReadBack(rows: readonly SessionEvent[], id: string): Promise<readonly SessionEvent[]> {
+  const Store = JsonlSessionPersistence
+  assert.ok(Store !== undefined, 'persistence codec must have loaded to run the round-trip')
   const root = mkdtempSync(join(tmpdir(), 'durable-admission-'))
   try {
-    const store = new JsonlSessionPersistence(new Context(), { root })
+    const store = new Store(new Context(), { root })
     const handle = await store.create({
       version: 3,
       id,
@@ -195,7 +217,7 @@ function userSource(row: SessionEvent): UserSource | undefined {
 
 // --- Tests -------------------------------------------------------------------
 
-test('engine-written durable rows round-trip through the released JSONL codec', async () => {
+test('engine-written durable rows round-trip through the released JSONL codec', { skip: persistenceSkipReason }, async () => {
   const rows = buildEngineLog().snapshotEvents()
 
   // Structural pin of what the engine wrote (the shapes under audit).
@@ -245,7 +267,7 @@ test('engine-written durable rows round-trip through the released JSONL codec', 
   assert.deepEqual(back, rows)
 })
 
-test('round-trip rejects structurally invalid rows (the net has teeth)', async () => {
+test('round-trip rejects structurally invalid rows (the net has teeth)', { skip: persistenceSkipReason }, async () => {
   const base = buildEngineLog().snapshotEvents()
 
   // (a) An assistant message without its model source is exactly what a
