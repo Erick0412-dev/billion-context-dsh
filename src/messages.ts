@@ -135,10 +135,13 @@ function stringifyArgs(args: unknown): string {
 /**
  * The tool-call id of one tool/result surface message, or null.
  *
- * Real DSH tool-result events carry NO `message.toolCallId` (hard-won rule
- * 10): the identity lives in the nested `{ type: 'tool-result', toolCallId }`
- * content block, falling back to `message.source.callId`. Shared with
- * `src/region.ts`'s call/result pairing — one implementation, never a copy.
+ * Three durable locations, in priority order (hard-won rule 10): the
+ * MESSAGE-level `toolCallId` field (written by dsh-llm's createToolResultMessage
+ * on the 0.1.7+ lines), the nested `{ type: 'tool-result', toolCallId }`
+ * content block, then `message.source.callId` (present on every line). A real
+ * event carries at least two of the three; the order only matters for
+ * fixtures that set a subset. Shared with `src/region.ts`'s call/result
+ * pairing — one implementation, never a copy.
  */
 export function toolCallIdOfResultEvent(event: SessionEvent): string | null {
   if (event.type !== 'tool/result') return null
@@ -146,12 +149,16 @@ export function toolCallIdOfResultEvent(event: SessionEvent): string | null {
   // ContentBlock union (readonly, toolCallId only on some members), which no
   // single straight assertion overlaps with across seam lines.
   const message = (event.data as unknown as {
-    message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
+    message?: {
+      toolCallId?: unknown
+      content?: Array<{ type?: unknown; toolCallId?: unknown }>
+      source?: { callId?: unknown }
+    }
   }).message
   const block = Array.isArray(message?.content)
     ? message.content.find((candidate) => candidate?.type === 'tool-result')
     : undefined
-  const id = block?.toolCallId ?? message?.source?.callId
+  const id = message?.toolCallId ?? block?.toolCallId ?? message?.source?.callId
   return typeof id === 'string' ? id : null
 }
 
