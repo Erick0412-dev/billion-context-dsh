@@ -383,16 +383,22 @@ export function protectedRowRejectionNote(
       if (!hasUserTurn && isRealUserTurn(event)) hasUserTurn = true
     }
   }
+  // A hit set that is ONLY the active user turn must not be explained with the
+  // AGENTS.md re-injection story (or its stale-copy escape): neither applies to
+  // a user message. Callers without a session keep the legacy instruction-only
+  // wording byte-for-byte (pre-#196 output, pinned by tests).
+  const userOnly = hasUserTurn && !hasInstructions
   const reasons: string[] = []
-  if (hasInstructions || (!hasInstructions && !hasUserTurn)) {
+  if (!userOnly) {
     reasons.push('the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing')
   }
   if (hasUserTurn) {
     reasons.push('the active user message must stay live to preserve conversation intent')
   }
   const reasonText = reasons.join('; ')
-  const rowLabel = hasUserTurn && !hasInstructions ? 'CURRENT guarded row(s)' : 'CURRENT injected instruction row(s)'
-  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} ${rowLabel} (seq ${preview}${more}); ${reasonText} — ${recovery} (older/stale copies of the same file are fine to compress)`
+  const rowLabel = hasUserTurn ? 'CURRENT guarded row(s)' : 'CURRENT injected instruction row(s)'
+  const staleCopyTail = userOnly ? '' : ' (older/stale copies of the same file are fine to compress)'
+  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} ${rowLabel} (seq ${preview}${more}); ${reasonText} — ${recovery}${staleCopyTail}`
 }
 
 /**
@@ -638,7 +644,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     } else if (duplicateRangeNotes.length > 0 && rejectedNotes.length === 0) {
       text.push('  (nothing compressed — every range resolved to a span an earlier range in this call already covers)')
     } else if (rejectedNotes.length > 0) {
-      text.push('  (nothing compressed — every range covered a current injected instruction row; see the rejections above)')
+      text.push('  (nothing compressed — every range covered a current guarded row, an injected policy row or the active user turn; see the rejections above)')
     }
     return { text: text.join('\n') }
   }
