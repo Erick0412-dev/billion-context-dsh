@@ -3460,7 +3460,8 @@ function stringifyArgs(args) {
 function toolCallIdOfResultEvent(event) {
   if (event.type !== "tool/result") return null;
   const message = event.data.message;
-  const id = message?.toolCallId ?? message?.source?.callId;
+  const block = Array.isArray(message?.content) ? message.content.find((candidate) => candidate?.type === "tool-result") : void 0;
+  const id = message?.toolCallId ?? block?.toolCallId ?? message?.source?.callId;
   return typeof id === "string" ? id : null;
 }
 function buildToolCallIndex(events) {
@@ -3676,7 +3677,8 @@ function isAgentInstructionsRow(event) {
 }
 function classifySurfaceEvent(event) {
   if (isCheckpointNode(event)) return "checkpoint";
-  if (event.type === "developer/message") return "metadata";
+  const eventType = event.type;
+  if (eventType === "developer/message") return "metadata";
   if (event.type !== "user/message") return "real";
   const source = event.data.source;
   if (!source) return "real";
@@ -5833,6 +5835,22 @@ function filterSettingsEntry(entry) {
     ...entry.autoNudge !== void 0 ? { autoNudge: entry.autoNudge } : {}
   };
 }
+var VOLATILE_WRITE = /* @__PURE__ */ Symbol.for("cosmokit.volatile.write");
+function isVolatileRef(value) {
+  return typeof value === "object" && value !== null && VOLATILE_WRITE in value;
+}
+function unwrapVolatile(value) {
+  if (isVolatileRef(value)) return value.get();
+  return value;
+}
+function liveSettingsFromRefs(entry) {
+  const out = {};
+  for (const key of SETTINGS_KEYS) {
+    const value = unwrapVolatile(entry[key]);
+    if (value !== void 0) out[key] = value;
+  }
+  return out;
+}
 function resolveAcpSettings(input) {
   return {
     modelContextLimit: input.modelContextLimit,
@@ -5850,6 +5868,18 @@ var AcpSettingsSchema = z.object({
   nudgeMaxContextLimitPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeMaxContextLimitPct),
   nudgeEmergencyThresholdPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeEmergencyThresholdPct),
   autoNudge: z.boolean().default(SETTING_DEFAULTS.autoNudge)
+});
+function markVolatile(schema) {
+  const capable = schema;
+  return typeof capable.volatile === "function" ? capable.volatile.call(schema) : schema;
+}
+var AcpPluginConfigSchema = z.object({
+  modelContextLimit: markVolatile(z.number().step(1).min(1)),
+  autoModelContextLimit: markVolatile(z.boolean()),
+  nudgeMinContextLimitPct: markVolatile(z.number().min(0).max(1)),
+  nudgeMaxContextLimitPct: markVolatile(z.number().min(0).max(1)),
+  nudgeEmergencyThresholdPct: markVolatile(z.number().min(0).max(1)),
+  autoNudge: markVolatile(z.boolean())
 });
 function describeSettingsChange(prev, next) {
   const warnings = [];
@@ -5889,21 +5919,27 @@ function requireService(getService) {
   return service;
 }
 function makeSettingsCommandSurface(getService, getSnapshot) {
+  let trackedRevision;
+  const findDescriptor = () => {
+    const service = getService();
+    if (service === void 0) return void 0;
+    const descriptor = service.describe().find((row) => String(row.ns) === ACP_SETTINGS_NAMESPACE);
+    if (descriptor?.revision !== void 0) trackedRevision = descriptor.revision;
+    return descriptor;
+  };
   return {
     get available() {
       return getService() !== void 0;
     },
     snapshot: getSnapshot,
-    describe() {
-      const service = getService();
-      if (service === void 0) return void 0;
-      return service.describe().find((descriptor) => String(descriptor.ns) === ACP_SETTINGS_NAMESPACE);
-    },
+    describe: findDescriptor,
     async update(patch) {
-      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch);
+      findDescriptor();
+      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch, trackedRevision);
     },
     async replaceSection(section) {
-      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section);
+      findDescriptor();
+      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section, trackedRevision);
     }
   };
 }
@@ -6271,6 +6307,17 @@ function assertNudgeThresholdOrder(config) {
   }
 }
 var AcpCompactionEngine = class extends CompactionEngine {
+  /**
+   * Static plugin config schema — cordis reads `plugin.Config` off the raw
+   * plugin value at fiber start and validates the composition row against it
+   * (`resolveConfig`). Class-shaped mounts carry this (the bundle/composition
+   * row path); function-shaped mounts skip validation and receive plain
+   * values. On dsh-settings ≥ 0.1.7 hosts this SAME schema is what SettingsForms
+   * builds its form from — the volatile fields are exactly what `/acp-prune
+   * config` exposes (see AcpPluginConfigSchema for why fields are volatile and
+   * default-free).
+   */
+  static Config = AcpPluginConfigSchema;
   /** The framework-agnostic ACP compression core, reused verbatim. */
   kernel;
   /** Per-session kernel state. */
@@ -6294,9 +6341,12 @@ var AcpCompactionEngine = class extends CompactionEngine {
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
-  /** Live settings snapshot thunk (composition row as of this line; a registered settings section would swap it). */
+  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (installSection on ≤0.1.6 lines, volatile-ref re-read on the ≥0.1.7 forms line). */
   readSettingsSource = () => resolveAcpSettings({});
-  /** The settings service for /acp-prune config; undefined until the engine declares a static Config schema and the host registers the section. */
+  /** Hot-apply driver: re-reads the live source and runs the change diff; called once per agent step, a no-op unless something changed. */
+  resyncSettings = () => {
+  };
+  /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). Structurally typed — both host lines' real services satisfy it. */
   settingsService;
   /** /acp-prune config read/write surface. */
   settingsCommand;
@@ -6308,21 +6358,76 @@ var AcpCompactionEngine = class extends CompactionEngine {
   overflowSessions = /* @__PURE__ */ new Map();
   constructor(ctx, config = {}) {
     super(ctx);
-    this.config = resolveAcpConfig(config);
+    this.config = resolveAcpConfig({ ...config, ...liveSettingsFromRefs(filterSettingsEntry(config)) });
     this.prompts = resolvePrompts2(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
     setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
     const compositionEntry = presetFilledSettingsEntry(config);
-    const current = resolveAcpSettings(compositionEntry);
+    const initialCurrent = resolveAcpSettings(liveSettingsFromRefs(compositionEntry));
+    let current = initialCurrent;
     this.readSettingsSource = () => current;
     const engine = this;
+    const applySettings = () => {
+      const next = this.readSettingsSource();
+      const prev = current;
+      current = next;
+      try {
+        engine.onSettingsChanged(prev, next);
+      } catch (error) {
+        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`);
+      }
+    };
+    this.resyncSettings = applySettings;
     this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current);
+    const detachSettings = () => {
+      this.settingsService = void 0;
+      this.readSettingsSource = () => initialCurrent;
+    };
     if (this.config.settingsEnabled !== false) {
-      this.ctx.logger.warn(
-        "billion-context-dsh: runtime settings are not registered on the 0.2.0 settings line yet (the engine declares no static Config schema for SettingsForms) \u2014 the six knobs keep their composition values and /acp-prune config reports the section unavailable"
-      );
+      ctx.inject(["settings"], (settingsCtx) => {
+        const face = settingsCtx.settings;
+        if (face === void 0 || typeof face !== "object") return void 0;
+        const service = face;
+        if (typeof service.installSection === "function") {
+          const legacy = service;
+          legacy.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, liveSettingsFromRefs(compositionEntry), {
+            // The seam's source type follows the entry it registered, so `source`
+            // is a partial view of the settings; re-resolve it into a
+            // fully-defaulted snapshot so every reader sees the same shape the
+            // composition path produced.
+            setSource: (source) => {
+              this.readSettingsSource = () => resolveAcpSettings(source());
+            },
+            onChange: applySettings
+          });
+          this.settingsService = legacy;
+          return detachSettings;
+        }
+        if (typeof service.describe === "function" && typeof service.update === "function" && typeof service.replace === "function") {
+          this.settingsService = {
+            describe: service.describe.bind(service),
+            update: service.update.bind(service),
+            replace: service.replace.bind(service)
+          };
+          this.readSettingsSource = () => resolveAcpSettings(liveSettingsFromRefs(compositionEntry));
+          try {
+            const rows = service.describe.call(service);
+            if (!rows.some((row) => String(row.ns) === ACP_SETTINGS_NAMESPACE)) {
+              this.ctx.logger.warn(
+                'billion-context-dsh: SettingsForms is present but no profile entry named "compaction-acp" is visible \u2014 the six knobs keep their composition values; /acp-prune config needs a composition row with that id (the bundle install provides it)'
+              );
+            }
+          } catch {
+          }
+          return detachSettings;
+        }
+        this.ctx.logger.warn(
+          "billion-context-dsh: host settings service speaks neither installSection (dsh-settings <= 0.1.6) nor SettingsForms describe/update/replace (>= 0.1.7) \u2014 the compaction-acp settings section is unavailable; the six knobs keep their composition values"
+        );
+        return void 0;
+      });
     }
     const env = {
       kernel: this.kernel,
@@ -6395,8 +6500,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
         }
       }
       if (event.type !== "tool/result") return;
-      const message = event.data.message;
-      const callId = message.toolCallId ?? message.source.callId;
+      const callId = toolCallIdOfResultEvent(event);
       if (typeof callId !== "string" || !this.compressCallIdsToHide.has(callId)) return;
       this.compressCallIdsToHide.delete(callId);
       deferCompressPairHide(session, callId, event.seq, (error) => {
@@ -6405,6 +6509,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     });
     ctx.on("agent/pre-step", async (payload, next) => {
       stripOrphanedSurfaceToolMessages(payload.agent.session);
+      engine.resyncSettings();
       if (!engine.readSettingsSource().autoNudge) return next();
       const decision = await next();
       if (decision.kind === "reject") return decision;
@@ -6693,6 +6798,7 @@ export {
   ACP_SYSTEM_PROMPT,
   ACP_SYSTEM_PROMPT_ORDER,
   AcpCompactionEngine,
+  AcpPluginConfigSchema,
   AcpSettingsSchema,
   AcpStateStore,
   AlreadyCompressedRangeError,
@@ -6704,6 +6810,7 @@ export {
   PRESET_NAMES,
   SETTINGS_KEYS,
   SETTING_DEFAULTS,
+  VOLATILE_WRITE,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,
@@ -6720,7 +6827,9 @@ export {
   findOpenTurn,
   hideCompressToolPair,
   isPresetName,
+  isVolatileRef,
   kernelConfigFor,
+  liveSettingsFromRefs,
   makeSettingsCommandSurface,
   makeTools,
   parseSettingValue,
@@ -6740,6 +6849,7 @@ export {
   stripOrphanedSurfaceToolMessages,
   summarySeqOfKernelBlock,
   surfaceEventsOf,
+  unwrapVolatile,
   windowSourceLabel
 };
 //# sourceMappingURL=index.js.map
