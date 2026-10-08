@@ -486,18 +486,38 @@ export function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlo
  *
  * Removal gate: delete once the peer floor moves past the last
  * wrapper-emitting dsh-compaction line (or upstream retires the shape there).
+ *
+ * Reachability is line-dependent, and so is its coverage: each dsh-compaction
+ * line derives its `CompactionCheckpointSource` type from its OWN marker
+ * constant, so the wrapper variant is present in the 0.1.5-line types (whose
+ * `compactCheckpointSource()` really does emit it) and absent from the 0.2.0-line
+ * ones (marker `{ kind: 'compact-checkpoint' }`). On the 0.2.0 baseline the
+ * rewrite below is therefore unreachable — and untypeable if written as a plain
+ * `source.kind === 'plugin'` comparison (TS2367 against a literal kind) — which is
+ * why the two identifying fields are read through a structural view and the
+ * normalized object is rebuilt from the fields both lines share.
  */
 export function checkpointSourceFor(
   session: Pick<Session, 'header'>,
   compactionId: CompactionId,
 ) {
   const source = compactCheckpointSource(compactionId)
-  if (!(source.kind === 'plugin' && source.plugin === 'compact')) return source
+  // Structural probe: never compare against `source.kind` directly (see above).
+  const shape: { readonly kind?: string; readonly plugin?: string } = source
+  if (shape.kind !== 'plugin' || shape.plugin !== 'compact') return source
   // header.version is typed as a per-line literal (3 on the devDep line); widen
   // through Number so this comparison compiles against both type lines.
   if (Number(session.header.version) < 4) return source
-  const { kind: _kind, plugin: _plugin, ...rest } = source
-  return Object.freeze({ ...rest, kind: 'compact-checkpoint' })
+  // Rebuild from the known fields instead of dropping `kind`/`plugin` out of a
+  // spread: the wrapper's own `plugin` member is exactly what a v4 writer
+  // rejects, and rebuilding keeps `compactionId`/`sourceCommandId` typed by the
+  // resolved copy rather than widened.
+  const { compactionId: id, sourceCommandId } = source
+  return Object.freeze({
+    kind: 'compact-checkpoint' as const,
+    compactionId: id,
+    ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+  })
 }
 
 /**
