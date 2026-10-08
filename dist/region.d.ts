@@ -11,6 +11,7 @@
  * @module billion-context-dsh/region
  */
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session';
+import { CompactionId } from '@deepseek-ai/dsh-compaction';
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
 import { type AcpBlockLedgerPayload } from './block-ledger.ts';
 /** One durable ACP block as rebuilt from the session log. */
@@ -158,6 +159,31 @@ export declare function verifiedReadingsOf(event: SessionEvent): string[];
  * 只动文本块，工具/图片块原样保留。
  */
 export declare function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[];
+/**
+ * Checkpoint source for the durable summary node, normalized for V4 writers.
+ *
+ * The copy of @deepseek-ai/dsh-compaction this engine resolves to may predate
+ * the host persisting the session: the plugin's peer range floors at the
+ * 0.1.5 line, whose compactCheckpointSource() still emits the retired V3
+ * wrapper shape { kind: 'plugin', plugin: 'compact' }. A DSH ≥0.1.7 v4
+ * persistence writer rejects that shape in producer-kind admission ("format
+ * v4 message requires a producer-owned source kind") and the WHOLE write batch
+ * wedges in memory — every later event piles behind the poison row until
+ * restart (issue #181; #165 fixed our own writers but not this host-supplied
+ * one). Normalize exactly that legacy shape when the session is persisted at
+ * format v4 — header.version decides which writer encodes the row, not which
+ * package resolved — and pass everything else through verbatim: older hosts
+ * still speak the wrapper, and newer dsh-compaction copies already emit the
+ * producer kind.
+ *
+ * Removal gate: delete once the peer floor moves past the last
+ * wrapper-emitting dsh-compaction line (or upstream retires the shape there).
+ */
+export declare function checkpointSourceFor(session: Pick<Session, 'header'>, compactionId: CompactionId): Readonly<{
+    compactionId: CompactionId;
+    sourceCommandId?: import("@deepseek-ai/dsh-commands").CommandId;
+    kind: "compact-checkpoint";
+}> | import("@deepseek-ai/dsh-compaction").CompactionCheckpointSource;
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.

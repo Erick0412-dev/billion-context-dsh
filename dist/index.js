@@ -4036,6 +4036,13 @@ function prefixSummaryBlocks(blocks) {
     return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) };
   });
 }
+function checkpointSourceFor(session, compactionId) {
+  const source = compactCheckpointSource(compactionId);
+  if (!(source.kind === "plugin" && source.plugin === "compact")) return source;
+  if (Number(session.header.version) < 4) return source;
+  const { kind: _kind, plugin: _plugin, ...rest } = source;
+  return Object.freeze({ ...rest, kind: "compact-checkpoint" });
+}
 function runCompactionTransaction(session, input) {
   assertNoActiveCompaction(sessionEventsOf(session));
   const turn = findOpenTurn(sessionEventsOf(session));
@@ -4079,7 +4086,9 @@ function runCompactionTransaction(session, input) {
     }).seq);
     const message = createUserMessage({
       content: framedSummary,
-      source: compactCheckpointSource(compactionId)
+      // Normalized for v4 writers when the resolved dsh-compaction copy still
+      // emits the retired wrapper shape (issue #181); verbatim otherwise.
+      source: checkpointSourceFor(session, compactionId)
     });
     seqs.push(session.append("user/message", message, {
       surfaceOp: { op: "replace", startSeq: input.start, endSeq: input.end },
